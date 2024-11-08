@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use ash::vk;
 use std::ffi::CString;
 use winit::{
@@ -10,33 +10,81 @@ use winit::{
 
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
-const VALIDATION: [&str; 1] = ["VK_LAYER_KHRONOS_VALIDATION"];
 
-#[cfg(debug_assertions)]
-const ENABLEVALIDATIONLAYERS: bool = true;
-
-#[cfg(not(debug_assertions))]
-const ENABLEVALIDATIONLAYERS: bool = false;
+#[derive(Default, Debug, PartialEq, Eq)]
+struct QueueFamilyIndices {
+    graphics_family: Option<u32>,
+}
+impl QueueFamilyIndices {
+    fn is_completed(&self) -> bool {
+        self.graphics_family.is_some()
+    }
+}
 
 struct VulkanApp {
-    entry: ash::Entry,
+    _entry: ash::Entry,
     instance: ash::Instance,
     _window: winit::window::Window,
+    _physical_device: vk::PhysicalDevice,
 }
 
 impl VulkanApp {
     pub fn new(event_loop: &EventLoop<()>) -> Result<Self> {
         let entry = unsafe { ash::Entry::load() }?;
-        let window = Self::init_window(&event_loop)?;
+        let window = Self::init_window(event_loop)?;
         window.set_resizable(false);
         let instance = Self::create_instance(&entry, window.display_handle()?.as_raw())?;
+        let physical_device = Self::pick_physical_device(&instance)?;
         Ok(VulkanApp {
-            entry,
+            _entry: entry,
             instance,
             _window: window,
+            _physical_device: physical_device,
         })
     }
 
+    fn find_queue_families(
+        instance: &ash::Instance,
+        device: vk::PhysicalDevice,
+    ) -> QueueFamilyIndices {
+        let queue_family_properties =
+            unsafe { instance.get_physical_device_queue_family_properties(device) };
+        let mut queue_family_indices = QueueFamilyIndices {
+            graphics_family: None,
+        };
+        for (i, queue_family) in queue_family_properties.iter().enumerate() {
+            if queue_family.queue_count > 0
+                && queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            {
+                queue_family_indices.graphics_family = Some(i as u32);
+            }
+
+            if queue_family_indices.is_completed() {
+                break;
+            }
+        }
+
+        queue_family_indices
+    }
+    fn pick_physical_device(instance: &ash::Instance) -> Result<vk::PhysicalDevice> {
+        let physical_devices: Vec<_> = unsafe { instance.enumerate_physical_devices() }?;
+        let devices: Vec<_> = physical_devices
+            .iter()
+            .filter(|device| Self::is_device_suitable(instance, **device))
+            .collect();
+
+        match devices.len() {
+            0 => Err(anyhow!(
+                "There are {} physical devices but None of them are suitable for our use case",
+                physical_devices.len()
+            )),
+            _ => Ok(*devices[0]),
+        }
+    }
+
+    fn is_device_suitable(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
+        Self::find_queue_families(instance, device).is_completed()
+    }
     fn create_instance(entry: &ash::Entry, handle: RawDisplayHandle) -> Result<ash::Instance> {
         let app_name = CString::new("Vulkan")?;
         let engine_name = CString::new("No Engine")?;
@@ -61,7 +109,7 @@ impl VulkanApp {
 
     pub fn main_loop(self, event_loop: EventLoop<()>) -> Result<()> {
         Ok(event_loop.run(move |event, control_flow| match event {
-            winit::event::Event::WindowEvent { ref event, .. } => match event {
+            winit::event::Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested
                 | WindowEvent::KeyboardInput {
                     event:
@@ -76,14 +124,6 @@ impl VulkanApp {
             },
             _ => {}
         })?)
-    }
-
-    fn check_validation_layer_support(&self) -> Result<Vec<vk::LayerProperties>> {
-        unsafe {
-            Ok(ash::Entry::enumerate_instance_layer_properties(
-                &self.entry,
-            )?)
-        }
     }
 }
 
