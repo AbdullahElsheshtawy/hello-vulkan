@@ -133,7 +133,7 @@ impl VulkanApp {
         let extension_names = ash_window::enumerate_required_extensions(handle)?;
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
-            .enabled_extension_names(&extension_names);
+            .enabled_extension_names(extension_names);
         Ok(unsafe { entry.create_instance(&create_info, None) }?)
     }
     fn init_window(event_loop: &EventLoop<()>) -> Result<winit::window::Window> {
