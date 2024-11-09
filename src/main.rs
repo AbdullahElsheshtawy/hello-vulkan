@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use std::ffi::CString;
 use winit::{
@@ -26,6 +26,8 @@ struct VulkanApp {
     instance: ash::Instance,
     _window: winit::window::Window,
     _physical_device: vk::PhysicalDevice,
+    logical_device: ash::Device,
+    graphics_queue: vk::Queue,
 }
 
 impl VulkanApp {
@@ -35,14 +37,40 @@ impl VulkanApp {
         window.set_resizable(false);
         let instance = Self::create_instance(&entry, window.display_handle()?.as_raw())?;
         let physical_device = Self::pick_physical_device(&instance)?;
+        let (logical_device, graphics_queue) =
+            Self::create_logical_device(&instance, physical_device)?;
         Ok(VulkanApp {
             _entry: entry,
             instance,
             _window: window,
             _physical_device: physical_device,
+            graphics_queue,
+            logical_device,
         })
     }
+    fn create_logical_device(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<(ash::Device, vk::Queue)> {
+        let indices = Self::find_queue_families(instance, physical_device);
 
+        let queue_priorities = [1.0_f32];
+        let queue_create_info = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(indices.graphics_family.context(format!(
+                "The graphics family of {:?} is None",
+                &physical_device
+            ))?)
+            .queue_priorities(&queue_priorities);
+
+        let device_features = unsafe { instance.get_physical_device_features(physical_device) };
+        let binding = [queue_create_info];
+        let create_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&binding)
+            .enabled_features(&device_features);
+        let device = unsafe { instance.create_device(physical_device, &create_info, None) }?;
+        let queue = unsafe { device.get_device_queue(indices.graphics_family.unwrap(), 0) };
+        Ok((device, queue))
+    }
     fn find_queue_families(
         instance: &ash::Instance,
         device: vk::PhysicalDevice,
@@ -85,6 +113,7 @@ impl VulkanApp {
     fn is_device_suitable(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
         Self::find_queue_families(instance, device).is_completed()
     }
+
     fn create_instance(entry: &ash::Entry, handle: RawDisplayHandle) -> Result<ash::Instance> {
         let app_name = CString::new("Vulkan")?;
         let engine_name = CString::new("No Engine")?;
@@ -129,7 +158,10 @@ impl VulkanApp {
 
 impl Drop for VulkanApp {
     fn drop(&mut self) {
-        unsafe { self.instance.destroy_instance(None) }
+        unsafe {
+            self.logical_device.destroy_device(None);
+            self.instance.destroy_instance(None);
+        }
     }
 }
 
