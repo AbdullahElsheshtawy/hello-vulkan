@@ -23,20 +23,24 @@ impl QueueFamilyIndices {
 
 struct VulkanApp {
     _entry: ash::Entry,
-    instance: ash::Instance,
-    _window: winit::window::Window,
     _physical_device: vk::PhysicalDevice,
+    _window: winit::window::Window,
+    _graphics_queue: vk::Queue,
+    instance: ash::Instance,
     logical_device: ash::Device,
-    graphics_queue: vk::Queue,
 }
 
 impl VulkanApp {
     pub fn new(event_loop: &EventLoop<()>) -> Result<Self> {
+        // Loading the vulkan dll
         let entry = unsafe { ash::Entry::load() }?;
         let window = Self::init_window(event_loop)?;
         window.set_resizable(false);
+        // Creating vulkan instance
         let instance = Self::create_instance(&entry, window.display_handle()?.as_raw())?;
+        // getting the actual GPU
         let physical_device = Self::pick_physical_device(&instance)?;
+        // making a logical device and queue to send commands to
         let (logical_device, graphics_queue) =
             Self::create_logical_device(&instance, physical_device)?;
         Ok(VulkanApp {
@@ -44,14 +48,15 @@ impl VulkanApp {
             instance,
             _window: window,
             _physical_device: physical_device,
-            graphics_queue,
             logical_device,
+            _graphics_queue: graphics_queue,
         })
     }
     fn create_logical_device(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
     ) -> Result<(ash::Device, vk::Queue)> {
+        // Getting the indices of a suitable queue family
         let indices = Self::find_queue_families(instance, physical_device);
 
         let queue_priorities = [1.0_f32];
@@ -62,12 +67,14 @@ impl VulkanApp {
             ))?)
             .queue_priorities(&queue_priorities);
 
+        // Going with the device features that the device has
         let device_features = unsafe { instance.get_physical_device_features(physical_device) };
         let binding = [queue_create_info];
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&binding)
             .enabled_features(&device_features);
         let device = unsafe { instance.create_device(physical_device, &create_info, None) }?;
+        // Going with the first suitable queue family of the device
         let queue = unsafe { device.get_device_queue(indices.graphics_family.unwrap(), 0) };
         Ok((device, queue))
     }
