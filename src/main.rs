@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
-use ash::vk;
+use ash::vk::{self, PhysicalDeviceImageCompressionControlSwapchainFeaturesEXT};
 use core::str;
-use std::ffi::CString;
+use std::{ffi::CString, fmt::Debug};
 use winit::{
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::EventLoop,
@@ -62,9 +62,10 @@ impl Surface {
 struct SwapChain {
     device: ash::khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
-    swapchain_images: Vec<vk::Image>,
+    images: Vec<vk::Image>,
     image_format: vk::Format,
     extent: vk::Extent2D,
+    image_views: Vec<vk::ImageView>,
 }
 struct VulkanApp {
     entry: ash::Entry,
@@ -188,13 +189,48 @@ impl VulkanApp {
         let swapchain_device = ash::khr::swapchain::Device::new(instance, device);
         let swapchain = unsafe { swapchain_device.create_swapchain(&create_info, None) }?;
         let swapchain_images = unsafe { swapchain_device.get_swapchain_images(swapchain) }?;
+        let image_views =
+            Self::create_image_views(device, &swapchain_images, surface_format.format);
         Ok(SwapChain {
             device: swapchain_device,
             swapchain,
-            swapchain_images,
+            images: swapchain_images,
             image_format: surface_format.format,
             extent,
+            image_views,
         })
+    }
+
+    fn create_image_views(
+        device: &ash::Device,
+        images: &Vec<vk::Image>,
+        format: vk::Format,
+    ) -> Vec<vk::ImageView> {
+        images
+            .iter()
+            .map(|image| {
+                let create_info = vk::ImageViewCreateInfo::default()
+                    .image(*image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .components(
+                        vk::ComponentMapping::default()
+                            .r(vk::ComponentSwizzle::IDENTITY)
+                            .g(vk::ComponentSwizzle::IDENTITY)
+                            .b(vk::ComponentSwizzle::IDENTITY)
+                            .a(vk::ComponentSwizzle::IDENTITY),
+                    )
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .base_array_layer(0)
+                            .level_count(1)
+                            .layer_count(1),
+                    );
+                unsafe { device.create_image_view(&create_info, None).unwrap() }
+            })
+            .collect()
     }
     fn create_logical_device(
         instance: &ash::Instance,
@@ -408,6 +444,9 @@ impl VulkanApp {
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
+            for image_view in &self.swapchain.image_views {
+                self.logical_device.destroy_image_view(*image_view, None);
+            }
             self.swapchain
                 .device
                 .destroy_swapchain(self.swapchain.swapchain, None);
