@@ -60,8 +60,11 @@ impl Surface {
 }
 
 struct SwapChain {
-    swapchain_device: ash::khr::swapchain::Device,
+    device: ash::khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
+    image_format: vk::Format,
+    extent: vk::Extent2D,
 }
 struct VulkanApp {
     entry: ash::Entry,
@@ -97,6 +100,7 @@ impl VulkanApp {
 
         let swapchain =
             Self::create_swapchain(&instance, &logical_device, physical_device, &surface)?;
+
         Ok(VulkanApp {
             entry,
             graphics_queue,
@@ -183,9 +187,13 @@ impl VulkanApp {
         };
         let swapchain_device = ash::khr::swapchain::Device::new(instance, device);
         let swapchain = unsafe { swapchain_device.create_swapchain(&create_info, None) }?;
+        let swapchain_images = unsafe { swapchain_device.get_swapchain_images(swapchain) }?;
         Ok(SwapChain {
-            swapchain_device,
+            device: swapchain_device,
             swapchain,
+            swapchain_images,
+            image_format: surface_format.format,
+            extent,
         })
     }
     fn create_logical_device(
@@ -401,7 +409,7 @@ impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
             self.swapchain
-                .swapchain_device
+                .device
                 .destroy_swapchain(self.swapchain.swapchain, None);
             self.surface
                 .instance
