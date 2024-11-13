@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Context, Result};
-use ash::vk::{self, PhysicalDeviceImageCompressionControlSwapchainFeaturesEXT};
+use ash::vk;
 use core::str;
-use std::{ffi::CString, fmt::Debug};
+use std::{any::Any, ffi::CString, fmt::Debug};
+use vk_shader_macros::include_glsl;
 use winit::{
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::EventLoop,
@@ -18,6 +19,7 @@ struct QueueFamilyIndices {
     graphics_family: Option<u32>,
     present_family: Option<u32>,
 }
+
 impl QueueFamilyIndices {
     fn is_completed(&self) -> bool {
         self.graphics_family.is_some() && self.present_family.is_some()
@@ -142,6 +144,36 @@ impl VulkanApp {
             formats,
             present_modes,
         })
+    }
+
+    fn create_graphics_pipeline(device: &ash::Device) -> Result<()> {
+        let vert_shader_module =
+            Self::create_shader_module(device, include_glsl!("shaders/triangle.vert"))?;
+        let frag_shader_module =
+            Self::create_shader_module(device, include_glsl!("shaders/triangle.frag"))?;
+
+        let main_function_name = CString::new("main")?;
+        let shader_stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_shader_module)
+                .name(&main_function_name),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .name(&main_function_name),
+        ];
+        unsafe {
+            device.destroy_shader_module(vert_shader_module, None);
+            device.destroy_shader_module(frag_shader_module, None)
+        };
+        Ok(())
+    }
+
+    fn create_shader_module(device: &ash::Device, code: &[u32]) -> Result<vk::ShaderModule> {
+        unsafe {
+            Ok(device
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(code), None)?)
+        }
     }
 
     fn create_swapchain(

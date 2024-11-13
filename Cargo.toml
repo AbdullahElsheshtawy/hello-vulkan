@@ -7,4 +7,5 @@ edition = "2021"
 anyhow = "1.0.93"
 ash = "0.38.0"
 ash-window = "0.13.0"
+vk-shader-macros = "0.2.10"
 winit = { version = "0.29", features = ["rwh_06"] }
