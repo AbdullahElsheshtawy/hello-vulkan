@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use core::str;
-use std::{any::Any, ffi::CString, fmt::Debug};
+use std::{ffi::CString, fmt::Debug};
 use vk_shader_macros::include_glsl;
 use winit::{
     event::{ElementState, KeyEvent, WindowEvent},
@@ -73,11 +73,12 @@ struct VulkanApp {
     entry: ash::Entry,
     graphics_queue: vk::Queue,
     instance: ash::Instance,
-    logical_device: ash::Device,
+    device: ash::Device,
     physical_device: vk::PhysicalDevice,
     present_queue: vk::Queue,
     surface: Surface,
     swapchain: SwapChain,
+    pipeline_layout: vk::PipelineLayout,
     window: winit::window::Window,
 }
 
@@ -93,26 +94,27 @@ impl VulkanApp {
         // getting the actual GPU
         let physical_device = Self::pick_physical_device(&instance, &surface)?;
         // making a logical device and queue to send commands to
-        let (logical_device, family_indices) =
+        let (device, family_indices) =
             Self::create_logical_device(&instance, physical_device, &surface)?;
 
         let graphics_queue =
-            unsafe { logical_device.get_device_queue(family_indices.graphics_family.unwrap(), 0) };
+            unsafe { device.get_device_queue(family_indices.graphics_family.unwrap(), 0) };
         let present_queue =
-            unsafe { logical_device.get_device_queue(family_indices.present_family.unwrap(), 0) };
+            unsafe { device.get_device_queue(family_indices.present_family.unwrap(), 0) };
 
-        let swapchain =
-            Self::create_swapchain(&instance, &logical_device, physical_device, &surface)?;
+        let swapchain = Self::create_swapchain(&instance, &device, physical_device, &surface)?;
 
+        let pipeline_layout = Self::create_graphics_pipeline(&device, &swapchain)?;
         Ok(VulkanApp {
             entry,
             graphics_queue,
             instance,
-            logical_device,
+            device,
             physical_device,
             present_queue,
             surface,
             swapchain,
+            pipeline_layout,
             window,
         })
     }
@@ -146,7 +148,10 @@ impl VulkanApp {
         })
     }
 
-    fn create_graphics_pipeline(device: &ash::Device) -> Result<()> {
+    fn create_graphics_pipeline(
+        device: &ash::Device,
+        swapchain: &SwapChain,
+    ) -> Result<vk::PipelineLayout> {
         let vert_shader_module =
             Self::create_shader_module(device, include_glsl!("shaders/triangle.vert"))?;
         let frag_shader_module =
@@ -162,11 +167,42 @@ impl VulkanApp {
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .name(&main_function_name),
         ];
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+        let vert_input_info = vk::PipelineVertexInputStateCreateInfo::default();
+
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        let rasterizer_info = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::CLOCKWISE);
+
+        let multisampling_info = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA);
+
+        let color_blending =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&[color_blend_attachment]);
+
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+
+        let pipeline_layout =
+            unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }?;
+
         unsafe {
             device.destroy_shader_module(vert_shader_module, None);
             device.destroy_shader_module(frag_shader_module, None)
         };
-        Ok(())
+
+        Ok(pipeline_layout)
     }
 
     fn create_shader_module(device: &ash::Device, code: &[u32]) -> Result<vk::ShaderModule> {
@@ -477,15 +513,17 @@ impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
             for image_view in &self.swapchain.image_views {
-                self.logical_device.destroy_image_view(*image_view, None);
+                self.device.destroy_image_view(*image_view, None);
             }
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
             self.swapchain
                 .device
                 .destroy_swapchain(self.swapchain.swapchain, None);
             self.surface
                 .instance
                 .destroy_surface(self.surface.surface, None);
-            self.logical_device.destroy_device(None);
+            self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
     }
