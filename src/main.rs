@@ -78,6 +78,7 @@ struct VulkanApp {
     present_queue: vk::Queue,
     surface: Surface,
     swapchain: SwapChain,
+    render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     window: winit::window::Window,
 }
@@ -104,6 +105,7 @@ impl VulkanApp {
 
         let swapchain = Self::create_swapchain(&instance, &device, physical_device, &surface)?;
 
+        let render_pass = Self::create_render_pass(&device, &swapchain)?;
         let pipeline_layout = Self::create_graphics_pipeline(&device, &swapchain)?;
         Ok(VulkanApp {
             entry,
@@ -116,6 +118,7 @@ impl VulkanApp {
             swapchain,
             pipeline_layout,
             window,
+            render_pass,
         })
     }
 
@@ -148,6 +151,29 @@ impl VulkanApp {
         })
     }
 
+    fn create_render_pass(device: &ash::Device, swapchain: &SwapChain) -> Result<vk::RenderPass> {
+        let color_attachments = [vk::AttachmentDescription::default()
+            .format(swapchain.image_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)];
+        let color_attachment_ref = [
+            vk::AttachmentReference::default().layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        ];
+
+        let subpass = [vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_attachment_ref)];
+
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&color_attachments)
+            .subpasses(&subpass);
+        unsafe { Ok(device.create_render_pass(&render_pass_info, None)?) }
+    }
     fn create_graphics_pipeline(
         device: &ash::Device,
         swapchain: &SwapChain,
@@ -515,6 +541,7 @@ impl Drop for VulkanApp {
             for image_view in &self.swapchain.image_views {
                 self.device.destroy_image_view(*image_view, None);
             }
+            self.device.destroy_render_pass(self.render_pass, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.swapchain
