@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use ash::{ext::swapchain_colorspace, vk};
-use core::{panic, str};
+use ash::vk;
+use core::str;
 use std::{ffi::CString, fmt::Debug};
 use vk_shader_macros::include_glsl;
 use winit::{
@@ -82,6 +82,8 @@ struct VulkanApp {
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     frame_buffers: Vec<vk::Framebuffer>,
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
     window: winit::window::Window,
 }
 
@@ -111,6 +113,16 @@ impl VulkanApp {
         let (graphics_pipeline, pipeline_layout) =
             Self::create_graphics_pipeline(&device, render_pass)?;
         let frame_buffers = Self::create_frame_buffers(&device, render_pass, &swapchain);
+        let command_pool = Self::create_command_pool(&device, family_indices)?;
+        let command_buffers = Self::create_command_buffers(
+            &device,
+            command_pool,
+            graphics_pipeline,
+            &frame_buffers,
+            render_pass,
+            swapchain.extent,
+        )?;
+
         Ok(VulkanApp {
             entry,
             graphics_queue,
@@ -125,6 +137,8 @@ impl VulkanApp {
             render_pass,
             graphics_pipeline,
             frame_buffers,
+            command_pool,
+            command_buffers,
         })
     }
 
@@ -590,6 +604,77 @@ impl VulkanApp {
             })
             .collect()
     }
+
+    fn create_command_pool(
+        device: &ash::Device,
+        indices: QueueFamilyIndices,
+    ) -> Result<vk::CommandPool> {
+        let create_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(indices.graphics_family.unwrap())
+            // .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        ;
+        Ok(unsafe { device.create_command_pool(&create_info, None) }?)
+    }
+
+    fn create_command_buffers(
+        device: &ash::Device,
+        command_pool: vk::CommandPool,
+        graphics_pipeline: vk::Pipeline,
+        framebuffers: &Vec<vk::Framebuffer>,
+        render_pass: vk::RenderPass,
+        surface_extent: vk::Extent2D,
+    ) -> Result<Vec<vk::CommandBuffer>> {
+        let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .command_buffer_count(framebuffers.len() as u32)
+            .level(vk::CommandBufferLevel::PRIMARY);
+
+        let command_buffers =
+            unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)? };
+
+        for (i, &command_buffer) in command_buffers.iter().enumerate() {
+            let command_buffer_begin_info = vk::CommandBufferBeginInfo::default();
+            let clear_values = [vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            }];
+
+            let render_pass_begin_info = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass)
+                .framebuffer(framebuffers[i])
+                .render_area(vk::Rect2D::default().extent(surface_extent))
+                .clear_values(&clear_values);
+            let viewport = [vk::Viewport::default()
+                .width(surface_extent.width as f32)
+                .height(surface_extent.height as f32)
+                .max_depth(1.0)];
+            let scissor = [vk::Rect2D::default().extent(surface_extent)];
+
+            unsafe {
+                device.begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
+                device.cmd_begin_render_pass(
+                    command_buffer,
+                    &render_pass_begin_info,
+                    vk::SubpassContents::INLINE,
+                );
+                device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    graphics_pipeline,
+                );
+                device.cmd_set_viewport(command_buffer, 0, &viewport);
+                device.cmd_set_scissor(command_buffer, 0, &scissor);
+                device.cmd_draw(command_buffer, 3, 1, 0, 0);
+
+                device.cmd_end_render_pass(command_buffer);
+
+                device.end_command_buffer(command_buffer)?
+            }
+        }
+
+        Ok(command_buffers)
+    }
 }
 
 impl Drop for VulkanApp {
@@ -601,6 +686,7 @@ impl Drop for VulkanApp {
             for frame_buffer in &self.frame_buffers {
                 self.device.destroy_framebuffer(*frame_buffer, None);
             }
+            self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.graphics_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
