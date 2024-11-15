@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use ash::vk;
+use ash::{ext::swapchain_colorspace, vk};
 use core::{panic, str};
 use std::{ffi::CString, fmt::Debug};
 use vk_shader_macros::include_glsl;
@@ -81,6 +81,7 @@ struct VulkanApp {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
+    frame_buffers: Vec<vk::Framebuffer>,
     window: winit::window::Window,
 }
 
@@ -108,7 +109,8 @@ impl VulkanApp {
 
         let render_pass = Self::create_render_pass(&device, &swapchain)?;
         let (graphics_pipeline, pipeline_layout) =
-            Self::create_graphics_pipeline(&device, render_pass, &swapchain)?;
+            Self::create_graphics_pipeline(&device, render_pass)?;
+        let frame_buffers = Self::create_frame_buffers(&device, render_pass, &swapchain);
         Ok(VulkanApp {
             entry,
             graphics_queue,
@@ -122,6 +124,7 @@ impl VulkanApp {
             window,
             render_pass,
             graphics_pipeline,
+            frame_buffers,
         })
     }
 
@@ -180,7 +183,6 @@ impl VulkanApp {
     fn create_graphics_pipeline(
         device: &ash::Device,
         render_pass: vk::RenderPass,
-        swapchain: &SwapChain,
     ) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
         let vert_shader_module =
             Self::create_shader_module(device, include_glsl!("shaders/triangle.vert"))?;
@@ -563,6 +565,31 @@ impl VulkanApp {
             _ => {}
         })?)
     }
+
+    fn create_frame_buffers(
+        device: &ash::Device,
+        render_pass: vk::RenderPass,
+        swapchain: &SwapChain,
+    ) -> Vec<vk::Framebuffer> {
+        swapchain
+            .image_views
+            .iter()
+            .map(|image| {
+                let attachments = [image.clone()];
+                let create_info = vk::FramebufferCreateInfo::default()
+                    .render_pass(render_pass)
+                    .attachments(&attachments)
+                    .width(swapchain.extent.width)
+                    .height(swapchain.extent.height)
+                    .layers(1);
+                unsafe {
+                    device
+                        .create_framebuffer(&create_info, None)
+                        .expect("Failed to create Framebuffer!")
+                }
+            })
+            .collect()
+    }
 }
 
 impl Drop for VulkanApp {
@@ -570,6 +597,9 @@ impl Drop for VulkanApp {
         unsafe {
             for image_view in &self.swapchain.image_views {
                 self.device.destroy_image_view(*image_view, None);
+            }
+            for frame_buffer in &self.frame_buffers {
+                self.device.destroy_framebuffer(*frame_buffer, None);
             }
             self.device.destroy_pipeline(self.graphics_pipeline, None);
             self.device
