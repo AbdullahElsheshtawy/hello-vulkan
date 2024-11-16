@@ -577,6 +577,7 @@ impl VulkanApp {
     pub fn main_loop(&mut self, event_loop: EventLoop<()>) {
         let (mut width, mut height) = (0, 0);
 
+        dbg!(event_loop.control_flow());
         event_loop
             .run(move |event, control_flow| {
                 if let winit::event::Event::WindowEvent { event, .. } = event {
@@ -594,9 +595,26 @@ impl VulkanApp {
                             unsafe {
                                 self.device
                                     .device_wait_idle()
-                                    .expect("Failed to wait device idle")
-                            };
-                            control_flow.exit()
+                                    .expect("Device failed to wait until idle");
+                            }
+                            control_flow.exit();
+                        }
+                        WindowEvent::KeyboardInput {
+                            event:
+                                KeyEvent {
+                                    state: ElementState::Pressed,
+                                    physical_key: PhysicalKey::Code(KeyCode::F11),
+                                    ..
+                                },
+                            ..
+                        } => {
+                            if self.window.fullscreen().is_some() {
+                                self.window.set_fullscreen(None);
+                            } else {
+                                self.window.set_fullscreen(Some(
+                                    winit::window::Fullscreen::Borderless(None),
+                                ));
+                            }
                         }
                         WindowEvent::RedrawRequested => {
                             self.window.request_redraw();
@@ -844,6 +862,7 @@ impl VulkanApp {
         };
     }
     fn recreate_swapchain(&mut self) -> Result<()> {
+        println!("Recreating Swapchain");
         unsafe { self.device.device_wait_idle()? };
         self.cleanup_swapchain();
         self.swapchain = Self::create_swapchain(
