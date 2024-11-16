@@ -1,13 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use core::str;
-use std::{any::Any, ffi::CString, fmt::Debug};
+use std::{ffi::CString, fmt::Debug};
 use vk_shader_macros::include_glsl;
 use winit::{
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
-    platform::pump_events::EventLoopExtPumpEvents,
     raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle},
 };
 
@@ -66,31 +65,33 @@ impl Surface {
 struct SwapChain {
     device: ash::khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
+    #[allow(dead_code)]
     images: Vec<vk::Image>,
     image_format: vk::Format,
     extent: vk::Extent2D,
     image_views: Vec<vk::ImageView>,
 }
 struct VulkanApp {
-    entry: ash::Entry,
-    graphics_queue: vk::Queue,
-    instance: ash::Instance,
+    command_buffers: Vec<vk::CommandBuffer>,
+    command_pool: vk::CommandPool,
+    current_frame: usize,
     device: ash::Device,
+    #[allow(dead_code)]
+    entry: ash::Entry,
+    frame_buffers: Vec<vk::Framebuffer>,
+    graphics_pipeline: vk::Pipeline,
+    graphics_queue: vk::Queue,
+    image_available_sem: Vec<vk::Semaphore>,
+    in_flight_fence: Vec<vk::Fence>,
+    instance: ash::Instance,
+    is_frame_buffer_resized: bool,
     physical_device: vk::PhysicalDevice,
+    pipeline_layout: vk::PipelineLayout,
     present_queue: vk::Queue,
+    render_finished_sem: Vec<vk::Semaphore>,
+    render_pass: vk::RenderPass,
     surface: Surface,
     swapchain: SwapChain,
-    render_pass: vk::RenderPass,
-    pipeline_layout: vk::PipelineLayout,
-    graphics_pipeline: vk::Pipeline,
-    frame_buffers: Vec<vk::Framebuffer>,
-    command_pool: vk::CommandPool,
-    command_buffers: Vec<vk::CommandBuffer>,
-    image_available_sem: Vec<vk::Semaphore>,
-    render_finished_sem: Vec<vk::Semaphore>,
-    in_flight_fence: Vec<vk::Fence>,
-    is_frame_buffer_resized: bool,
-    current_frame: usize,
     window: winit::window::Window,
 }
 
@@ -356,7 +357,7 @@ impl VulkanApp {
 
     fn create_image_views(
         device: &ash::Device,
-        images: &Vec<vk::Image>,
+        images: &[vk::Image],
         format: vk::Format,
     ) -> Vec<vk::ImageView> {
         images
@@ -573,46 +574,47 @@ impl VulkanApp {
             .build(event_loop)?)
     }
 
-    pub fn main_loop(&mut self, event_loop: EventLoop<()>) -> Result<()> {
+    pub fn main_loop(&mut self, event_loop: EventLoop<()>) {
         let (mut width, mut height) = (0, 0);
 
-        Ok(event_loop
-            .run(|event, control_flow| match event {
-                winit::event::Event::WindowEvent { event, .. } => match event {
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        event:
-                            KeyEvent {
-                                state: ElementState::Pressed,
-                                physical_key: PhysicalKey::Code(KeyCode::Escape),
-                                ..
-                            },
-                        ..
-                    } => {
-                        unsafe {
-                            self.device
-                                .device_wait_idle()
-                                .expect("Failed to wait device idle")
-                        };
-                        control_flow.exit()
-                    }
-                    WindowEvent::RedrawRequested => {
-                        self.window.request_redraw();
-                        if width > 0 && height > 0 {
-                            self.draw_frame().expect("Could not draw frame!");
+        event_loop
+            .run(move |event, control_flow| {
+                if let winit::event::Event::WindowEvent { event, .. } = event {
+                    match event {
+                        WindowEvent::CloseRequested
+                        | WindowEvent::KeyboardInput {
+                            event:
+                                KeyEvent {
+                                    state: ElementState::Pressed,
+                                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                    ..
+                                },
+                            ..
+                        } => {
+                            unsafe {
+                                self.device
+                                    .device_wait_idle()
+                                    .expect("Failed to wait device idle")
+                            };
+                            control_flow.exit()
                         }
-                    }
-                    WindowEvent::Resized(new_size) => {
-                        (width, height) = (new_size.width, new_size.height);
-                        if width > 0 && height > 0 {
-                            self.recreate_swapchain().unwrap();
+                        WindowEvent::RedrawRequested => {
+                            self.window.request_redraw();
+                            if width > 0 && height > 0 {
+                                self.draw_frame().expect("Could not draw frame!");
+                            }
                         }
+                        WindowEvent::Resized(new_size) => {
+                            (width, height) = (new_size.width, new_size.height);
+                            if width > 0 && height > 0 {
+                                self.recreate_swapchain().unwrap();
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
-                _ => {}
+                }
             })
-            .unwrap())
+            .unwrap();
     }
 
     fn create_frame_buffers(
@@ -624,7 +626,7 @@ impl VulkanApp {
             .image_views
             .iter()
             .map(|image| {
-                let attachments = [image.clone()];
+                let attachments = [*image];
                 let create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(render_pass)
                     .attachments(&attachments)
@@ -782,7 +784,7 @@ impl VulkanApp {
         };
         match should_recreate {
             Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.recreate_swapchain(),
-            _ => Ok({}),
+            _ => Ok(()),
         }?;
 
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -883,6 +885,6 @@ impl Drop for VulkanApp {
 fn main() -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = VulkanApp::new(&event_loop)?;
-    app.main_loop(event_loop)?;
+    app.main_loop(event_loop);
     Ok(())
 }
