@@ -1,19 +1,20 @@
 use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use core::str;
-use std::{ffi::CString, fmt::Debug};
+use std::{any::Any, ffi::CString, fmt::Debug};
 use vk_shader_macros::include_glsl;
 use winit::{
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
+    platform::pump_events::EventLoopExtPumpEvents,
     raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle},
 };
 
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 const REQUIRED_EXTENSIONS: [&str; 1] = ["VK_KHR_SWAPCHAIN"];
-const FRAMES_IN_FLIGHT: usize = 2;
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 #[derive(Default, Debug, PartialEq, Eq)]
 struct QueueFamilyIndices {
@@ -88,6 +89,7 @@ struct VulkanApp {
     image_available_sem: Vec<vk::Semaphore>,
     render_finished_sem: Vec<vk::Semaphore>,
     in_flight_fence: Vec<vk::Fence>,
+    is_frame_buffer_resized: bool,
     current_frame: usize,
     window: winit::window::Window,
 }
@@ -142,6 +144,7 @@ impl VulkanApp {
             render_finished_sem,
             in_flight_fence,
             current_frame: usize::default(),
+            is_frame_buffer_resized: false,
         })
     }
 
@@ -567,38 +570,49 @@ impl VulkanApp {
         Ok(winit::window::WindowBuilder::new()
             .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
             .with_title("Vulkan")
-            .with_resizable(false)
             .build(event_loop)?)
     }
 
     pub fn main_loop(&mut self, event_loop: EventLoop<()>) -> Result<()> {
-        Ok(event_loop.run(move |event, control_flow| match event {
-            winit::event::Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested
-                | WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            state: ElementState::Pressed,
-                            physical_key: PhysicalKey::Code(KeyCode::Escape),
-                            ..
-                        },
-                    ..
-                } => {
-                    unsafe {
-                        self.device
-                            .device_wait_idle()
-                            .expect("Failed to wait device idle")
-                    };
-                    control_flow.exit()
-                }
-                WindowEvent::RedrawRequested => {
-                    self.window.request_redraw();
-                    self.draw_frame().expect("Could not draw frame");
-                }
+        let (mut width, mut height) = (0, 0);
+
+        Ok(event_loop
+            .run(|event, control_flow| match event {
+                winit::event::Event::WindowEvent { event, .. } => match event {
+                    WindowEvent::CloseRequested
+                    | WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                state: ElementState::Pressed,
+                                physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                ..
+                            },
+                        ..
+                    } => {
+                        unsafe {
+                            self.device
+                                .device_wait_idle()
+                                .expect("Failed to wait device idle")
+                        };
+                        control_flow.exit()
+                    }
+                    WindowEvent::RedrawRequested => {
+                        self.window.request_redraw();
+                        if width > 0 && height > 0 {
+                            self.draw_frame().expect("Could not draw frame!");
+                        }
+                    }
+                    WindowEvent::Resized(new_size) => {
+                        (width, height) = (new_size.width, new_size.height);
+                        if width > 0 && height > 0 {
+                            self.recreate_swapchain().unwrap();
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
-            },
-            _ => {}
-        })?)
+            })
+            .unwrap())
     }
 
     fn create_frame_buffers(
@@ -642,7 +656,7 @@ impl VulkanApp {
     ) -> Result<Vec<vk::CommandBuffer>> {
         let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
-            .command_buffer_count(FRAMES_IN_FLIGHT as u32)
+            .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32)
             .level(vk::CommandBufferLevel::PRIMARY);
 
         let command_buffer =
@@ -712,9 +726,8 @@ impl VulkanApp {
         let fence = [self.in_flight_fence[self.current_frame]];
         unsafe {
             self.device.wait_for_fences(&fence, true, u64::MAX)?;
-            self.device.reset_fences(&fence)?;
         }
-        let (image_index, _) = unsafe {
+        let (image_index, is_suboptimal) = unsafe {
             self.swapchain.device.acquire_next_image(
                 self.swapchain.swapchain,
                 u64::MAX,
@@ -723,7 +736,15 @@ impl VulkanApp {
             )?
         };
 
+        if is_suboptimal || self.is_frame_buffer_resized {
+            self.recreate_swapchain()
+                .context("Could not recreate the swapchain")?;
+            self.is_frame_buffer_resized = false;
+            return Ok(());
+        }
+
         unsafe {
+            self.device.reset_fences(&fence)?;
             self.device.reset_command_buffer(
                 self.command_buffers[self.current_frame],
                 vk::CommandBufferResetFlags::empty(),
@@ -754,13 +775,17 @@ impl VulkanApp {
             .swapchains(&swapchains)
             .image_indices(&image_index);
 
-        unsafe {
+        let should_recreate = unsafe {
             self.swapchain
                 .device
-                .queue_present(self.present_queue, &present_info)?;
-        }
+                .queue_present(self.present_queue, &present_info)
+        };
+        match should_recreate {
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.recreate_swapchain(),
+            _ => Ok({}),
+        }?;
 
-        self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         Ok(())
     }
 
@@ -771,7 +796,7 @@ impl VulkanApp {
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let (mut image_available_sems, mut render_finished_sems, mut fences) =
             (vec![], vec![], vec![]);
-        for _ in 0..FRAMES_IN_FLIGHT {
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
             unsafe {
                 image_available_sems.push(
                     device
@@ -793,34 +818,59 @@ impl VulkanApp {
 
         Ok((image_available_sems, render_finished_sems, fences))
     }
-}
 
-impl Drop for VulkanApp {
-    fn drop(&mut self) {
-        unsafe {
-            for image_view in &self.swapchain.image_views {
-                self.device.destroy_image_view(*image_view, None);
-            }
-            for frame_buffer in &self.frame_buffers {
-                self.device.destroy_framebuffer(*frame_buffer, None);
-            }
-
-            for i in 0..FRAMES_IN_FLIGHT {
+    fn cleanup_swapchain(&mut self) {
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            unsafe {
                 self.device
                     .destroy_semaphore(self.image_available_sem[i], None);
                 self.device
                     .destroy_semaphore(self.render_finished_sem[i], None);
                 self.device.destroy_fence(self.in_flight_fence[i], None);
             }
+        }
+        for image_view in &self.swapchain.image_views {
+            unsafe { self.device.destroy_image_view(*image_view, None) };
+        }
+        for frame_buffer in &self.frame_buffers {
+            unsafe { self.device.destroy_framebuffer(*frame_buffer, None) };
+        }
+        unsafe {
+            self.swapchain
+                .device
+                .destroy_swapchain(self.swapchain.swapchain, None)
+        };
+    }
+    fn recreate_swapchain(&mut self) -> Result<()> {
+        unsafe { self.device.device_wait_idle()? };
+        self.cleanup_swapchain();
+        self.swapchain = Self::create_swapchain(
+            &self.instance,
+            &self.device,
+            self.physical_device,
+            &self.surface,
+        )?;
+        (
+            self.image_available_sem,
+            self.render_finished_sem,
+            self.in_flight_fence,
+        ) = Self::create_sync_objects(&self.device)?;
 
+        self.frame_buffers =
+            Self::create_frame_buffers(&self.device, self.render_pass, &self.swapchain);
+        Ok(())
+    }
+}
+
+impl Drop for VulkanApp {
+    fn drop(&mut self) {
+        unsafe {
+            self.cleanup_swapchain();
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.graphics_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
-            self.swapchain
-                .device
-                .destroy_swapchain(self.swapchain.swapchain, None);
             self.surface
                 .instance
                 .destroy_surface(self.surface.surface, None);
